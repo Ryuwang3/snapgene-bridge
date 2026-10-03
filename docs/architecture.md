@@ -1,50 +1,55 @@
 # Architecture
 
-## Trust boundary
+```text
+client (agent machine)                         node (machine with SnapGene)
+----------------------                         ----------------------------
+cli.py         commands, JSON envelope
+design/        candidates, screening, pairing
+oracle.py      SnapGeneOracle | EstimateOracle
+transport.py   SSH, script on stdin  ───────►  python -m snapgene_bridge.node
+                                                node/runner.py   batch job runner
+                                                snapgene_genbank.py  GenBank-SnapGene writer
+                                                node/backends.py SnapGene.exe via WSL interop
+                                                  └─ SnapGene --convert (one process per batch)
+                                                sgffp            read binding sites back
+```
 
-The bridge trusts only local input files, the explicitly selected scientific
-libraries, and the command arguments supplied by the user or agent. SnapGene
-is a viewer and review surface. A generated file is opened there after the
-bridge has completed validation.
+## Request path
 
-The bridge does not assume that a file open in SnapGene will reload after an
-external write. Operations therefore write a new path and ask the user to
-review that path.
+1. A design command builds candidates.
+   - `clone`: every annealing length at both fixed insert ends.
+   - `pcr`: unique primers from primer3 pairs, using SnapGene-like salt
+     settings.
+2. `SnapGeneOracle.evaluate` sends one job (template, primers, and optionally
+   features) to the node.
+3. The node takes a lock, refuses to run if SnapGene is already open, and
+   writes GenBank-SnapGene files. It then runs `SnapGene --convert` on the
+   whole list and parses each `.dna` with `sgffp`. The response is framed by
+   marker lines, so shell noise cannot corrupt it.
+4. The client matches each candidate to its intended site by strand and 3'
+   end. The 5' edge may differ, because SnapGene extends the annealed region
+   into tail bases that happen to pair. All other sites are off-targets.
+5. Screening rejects candidates in three cases:
+   - not imported, meaning SnapGene found no site with a Tm of at least 40 C;
+   - intended site missing;
+   - off-target at or above `offtarget_max_tm`.
+6. Pairs are ranked by distance from the target Tm, then Tm difference, then
+   length and 3' clamp. For PCR, primer3's own penalty is also used.
+7. With `--output x.dna`, a second job containing the chosen primers is
+   returned as SnapGene-generated `.dna` bytes.
 
-## Layers
+## Failure handling
 
-### Command layer
+| Situation | Behaviour |
+|---|---|
+| GUI open on the node | `snapgene_busy`, nothing is started |
+| Hidden dialog | `snapgene_timeout` after `timeout_s`, with the dialog text read through UI Automation. Only SnapGene processes that appeared during the run are stopped. |
+| Node not installed | Framed `node_not_deployed` answer from the shell script; `deploy` fixes it |
+| Version skew | `status` reports it; `deploy` fixes it |
 
-`cli.py` exposes a small command set and one JSON envelope. An error has a
-stable `error.code`, a human-readable message, and an optional install or
-recovery hint. This makes the CLI usable by Claude Code, shell scripts, and a
-future MCP wrapper without scraping human-oriented text.
+## Data
 
-### Model layer
-
-`models.py` converts format-specific coordinates into one contract. Features
-and primer binding sites use zero-based, half-open intervals. Validation is
-performed before a file is written.
-
-### Adapter layer
-
-- FASTA is implemented with the Python standard library.
-- GenBank is loaded lazily through Biopython.
-- SnapGene files are loaded lazily through `sgffp`.
-
-An adapter may preserve more metadata than the normalized model, but it must
-not change the coordinate contract.
-
-### Operation layer
-
-`primer_design.py` calls Primer3 through `primer3-py`. It records the selected
-standard in every primer. A later polymerase-specific backend must publish a
-separate name and calibration evidence rather than silently replacing the
-Primer3 values.
-
-## Future adapters
-
-The desktop adapter may provide `open`, application detection, and screenshot
-evidence. It must remain optional and must never be treated as the source of
-truth for sequence content. A future MCP server can call the same Python
-operations and expose the same JSON objects.
+- `selftest_data/` holds SnapGene 8.0.0 results for 208 primers: synthetic
+  templates plus public pUC19.
+- `tests/data/regression6.snapgene-8.0.0.dna` is a real SnapGene output used
+  to test parsing without a node.

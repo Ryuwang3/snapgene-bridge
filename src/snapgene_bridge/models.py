@@ -38,13 +38,17 @@ class Segment:
     start: int
     end: int
 
-    def validate(self, sequence_length: int) -> None:
-        if self.start < 0 or self.end < 0 or self.start >= self.end:
+    def validate(self, sequence_length: int, circular: bool = False) -> None:
+        """Check bounds; on a circular molecule ``end <= start`` means the interval wraps."""
+
+        if self.start < 0 or self.end < 0 or self.start >= sequence_length:
             raise ValidationError(f"Invalid segment [{self.start}, {self.end}).")
         if self.end > sequence_length:
             raise ValidationError(
                 f"Segment [{self.start}, {self.end}) exceeds sequence length {sequence_length}."
             )
+        if self.end <= self.start and not circular:
+            raise ValidationError(f"Invalid segment [{self.start}, {self.end}).")
 
     def to_dict(self) -> dict[str, int]:
         return {"start": self.start, "end": self.end}
@@ -72,7 +76,7 @@ class Feature:
     def end(self) -> int:
         return max(segment.end for segment in self.segments)
 
-    def validate(self, sequence_length: int) -> None:
+    def validate(self, sequence_length: int, circular: bool = False) -> None:
         if not self.name:
             raise ValidationError("Feature name cannot be empty.")
         if not self.type:
@@ -82,7 +86,7 @@ class Feature:
         if not self.segments:
             raise ValidationError(f"Feature {self.name!r} has no segments.")
         for segment in self.segments:
-            segment.validate(sequence_length)
+            segment.validate(sequence_length, circular)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -115,13 +119,13 @@ class Primer:
     binding_start: int | None = None
     binding_end: int | None = None
     tm_celsius: float | None = None
-    tm_standard: str = "primer3"
+    tm_standard: str = "unknown"
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sequence", normalize_sequence(self.sequence))
 
-    def validate(self, sequence_length: int) -> None:
+    def validate(self, sequence_length: int, circular: bool = False) -> None:
         if not self.name:
             raise ValidationError("Primer name cannot be empty.")
         if not self.sequence:
@@ -133,7 +137,7 @@ class Primer:
                 f"Primer {self.name!r} must provide both binding_start and binding_end."
             )
         if self.binding_start is not None and self.binding_end is not None:
-            Segment(self.binding_start, self.binding_end).validate(sequence_length)
+            Segment(self.binding_start, self.binding_end).validate(sequence_length, circular)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -162,7 +166,7 @@ class Primer:
             tm_celsius=(
                 float(value["tm_celsius"]) if value.get("tm_celsius") is not None else None
             ),
-            tm_standard=str(value.get("tm_standard", "primer3")),
+            tm_standard=str(value.get("tm_standard", "unknown")),
             metadata=dict(value.get("metadata", {})),
         )
 
@@ -193,10 +197,11 @@ class MoleculeRecord:
             raise ValidationError(f"Unsupported topology {self.topology!r}.")
         if not self.sequence:
             raise ValidationError("Molecule sequence cannot be empty.")
+        circular = self.topology == "circular"
         for feature in self.features:
-            feature.validate(self.length)
+            feature.validate(self.length, circular)
         for primer in self.primers:
-            primer.validate(self.length)
+            primer.validate(self.length, circular)
 
     def with_primers(self, primers: Iterable[Primer]) -> MoleculeRecord:
         result = MoleculeRecord(

@@ -12,13 +12,33 @@ following routes:
 | Route | Working conclusion | Repository implication |
 | --- | --- | --- |
 | Embedded plugin | No supported public plugin boundary was found in the reviewed material. | Do not build around an undocumented in-process API. |
-| Official CLI | Useful for fixed batch operations such as conversion and map export. | Treat it as an optional black-box helper, not an evaluator. |
+| Official CLI | Conversion and map export only, but GenBank-SnapGene import computes primer sites and Tm. | Used as the Tm and binding-site oracle (ADR 0002). |
 | GUI automation | Can open files and demonstrate UI flows, but is fragile as a data interface. | Keep it optional and evidence-oriented. |
 | File-first bridge | External engines can calculate primers and write a new artifact for review. | Use this as the MVP architecture. |
 
 The phrase “black-box CLI” means that the process accepts a documented file and
 arguments and returns a documented file or image. It does not mean that an
 agent can send arbitrary commands into the running application.
+
+## Verified behaviour (SnapGene 8.0.0, Windows 11, 2026-10-03)
+
+These observations come from running the official `SnapGene.exe` command line
+through WSL interop. The regression data in `src/snapgene_bridge/selftest_data`
+was recorded in the same session.
+
+| Observation | Evidence |
+|---|---|
+| `--help` exits 0 but prints nothing on Windows | Output was empty with pipes and under a pseudo-terminal |
+| `--convert` blocks on the first-run name/e-mail dialog until it is completed once in the GUI | UI Automation read the dialog: 名称, 电子邮件, 可以, 取消. Clicking Cancel quits without output. |
+| `.dna` to `.dna` conversion is a byte-identical copy | Checked with `cmp` |
+| The output extension is normalised: a `.gb` export target is written as `.gbk` | Observed |
+| GenBank import creates primers only when the `JOURNAL   Exported ... from SnapGene ...` line is present | 5 variants: colour name language and label quoting had no effect |
+| Imported primers get SnapGene-computed binding sites, integer Tm and alignment components | Re-import of SnapGene's own export reproduced the stored values |
+| Location hints on `primer_bind` are ignored | 198 of 198 primers identical with true and with dummy hints |
+| Primers without any site of Tm 40 C or more are not imported | 36 of 2000 random primers; all short and AT-rich |
+| Batch cost is dominated by startup | 200 or 1000 primers in one file took 4.8 s; 20 files took 6.7 s |
+| A 65 nt primer note on one long line imports correctly | `check` with a 45 nt tail |
+| A textbook nearest-neighbour model matched SnapGene's integer Tm in 61 % of 2162 perfect-match sites, with a mean absolute error of 0.51 C | Basis for using SnapGene rather than re-implementing it |
 
 ## Candidate components
 

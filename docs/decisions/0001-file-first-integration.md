@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for the MVP.
+Accepted for the MVP; partly superseded by [ADR 0002](0002-snapgene-cli-oracle.md). File output and the no-injection rule still apply; Tm and binding sites now come from SnapGene's own command line.
 
 ## Context
 

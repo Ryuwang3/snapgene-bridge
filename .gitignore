@@ -14,3 +14,6 @@ output/
 *.fasta
 *.fa
 *.log
+
+# fixtures are synthetic or public and stay tracked
+!tests/data/*

@@ -32,7 +32,7 @@ class WriteReport:
 def _dependency(name: str, extra: str, error: Exception) -> DependencyMissingError:
     return DependencyMissingError(
         f"Reading or writing this format requires optional dependency {name!r}.",
-        hint=f"Install it with: uv sync --extra {extra}",
+        hint=f"{name} is a declared dependency; reinstall snapgene-bridge.",
     )
 
 
@@ -139,8 +139,9 @@ def _read_genbank(source: Path) -> MoleculeRecord:
         )
     parsed = records[0]
     features: list[Feature] = []
+    primers: list[Primer] = []
     for item in parsed.features:
-        if item.location is None:
+        if item.location is None or item.type == "source":
             continue
         segments = tuple(Segment(int(part.start), int(part.end)) for part in item.location.parts)
         qualifiers: dict[str, Any] = {}
@@ -155,6 +156,10 @@ def _read_genbank(source: Path) -> MoleculeRecord:
         strand = (
             "." if item.location.strand is None else ("+" if item.location.strand >= 0 else "-")
         )
+        primer_sequence = _snapgene_primer_sequence(item.qualifiers.get("note", []))
+        if item.type == "primer_bind" and primer_sequence:
+            primers.append(Primer(name=str(label), sequence=primer_sequence))
+            continue
         features.append(
             Feature(
                 name=str(label),
@@ -169,6 +174,7 @@ def _read_genbank(source: Path) -> MoleculeRecord:
         sequence=str(parsed.seq),
         topology="circular" if parsed.annotations.get("topology") == "circular" else "linear",
         features=features,
+        primers=primers,
         source_format="genbank",
         metadata={
             "description": parsed.description,
@@ -187,15 +193,25 @@ def _read_snapgene(source: Path) -> MoleculeRecord:
 
     try:
         parsed = sgffp.SgffReader.from_file(source)
+        length = len(parsed.sequence.value)
         features: list[Feature] = []
         for item in parsed.features:
             if not item.segments:
                 continue
+            segments: list[Segment] = []
+            for part in item.segments:
+                start, end = int(part.start), int(part.end)
+                if end > start:
+                    segments.append(Segment(start, end))
+                else:  # origin-spanning segment on a circular molecule
+                    segments.append(Segment(start, length))
+                    if end > 0:
+                        segments.append(Segment(0, end))
             features.append(
                 Feature(
                     name=item.name or item.type or "feature",
                     type=item.type or "misc_feature",
-                    segments=tuple(Segment(int(s.start), int(s.end)) for s in item.segments),
+                    segments=tuple(segments),
                     strand=item.strand if item.strand in {"+", "-"} else ".",
                     qualifiers=dict(item.qualifiers or {}),
                 )
@@ -203,8 +219,11 @@ def _read_snapgene(source: Path) -> MoleculeRecord:
 
         primers: list[Primer] = []
         for item in parsed.primers:
-            site = next(
-                (candidate for candidate in item.binding_sites if not candidate.simplified), None
+            # the strongest site is the intended one; weaker ones are off-target matches
+            site = max(
+                (candidate for candidate in item.binding_sites if not candidate.simplified),
+                key=lambda candidate: candidate.melting_temperature or 0.0,
+                default=None,
             )
             primers.append(
                 Primer(
@@ -214,6 +233,7 @@ def _read_snapgene(source: Path) -> MoleculeRecord:
                     binding_start=(site.start if site else None),
                     binding_end=(site.end if site else None),
                     tm_celsius=(site.melting_temperature if site else None),
+                    tm_standard="snapgene-file" if site else "unknown",
                 )
             )
         record = MoleculeRecord(
@@ -260,84 +280,51 @@ def _write_snapgene(record: MoleculeRecord, target: Path) -> WriteReport:
                 )
             )
         for primer in record.primers:
-            binding_sites = []
-            if primer.binding_start is not None and primer.binding_end is not None:
-                binding_sites.append(
-                    sgffp.SgffBindingSite(
-                        start=primer.binding_start,
-                        end=primer.binding_end,
-                        bound_strand=primer.strand,
-                        annealed_bases=primer.sequence,
-                        melting_temperature=primer.tm_celsius,
-                    )
-                )
-            sgff.primers.add(
-                sgffp.SgffPrimer(
-                    name=primer.name,
-                    sequence=primer.sequence,
-                    binding_sites=binding_sites,
-                )
-            )
-        sgffp.SgffWriter(target).write(sgff)
+            # No binding sites: stored sites would carry a Tm SnapGene did not compute.
+            sgff.primers.add(sgffp.SgffPrimer(name=primer.name, sequence=primer.sequence))
+        sgffp.SgffWriter.to_file(sgff, target)
     except Exception as error:
         raise InputError(f"Could not write SnapGene file {target}: {error}") from error
-    return WriteReport(str(target), "snapgene")
+    warnings = ()
+    if record.primers:
+        warnings = (
+            "Primers are stored without binding sites; SnapGene computes them when the file is "
+            "opened. Prefer `--output` with a configured node for a SnapGene-generated file.",
+        )
+    return WriteReport(str(target), "snapgene", warnings)
 
 
 def _write_genbank(record: MoleculeRecord, target: Path) -> WriteReport:
-    try:
-        from Bio import SeqIO
-        from Bio.Seq import Seq
-        from Bio.SeqFeature import CompoundLocation, SeqFeature, SimpleLocation
-        from Bio.SeqRecord import SeqRecord
-    except ImportError as error:  # pragma: no cover - exercised by environment
-        raise _dependency("biopython", "bio", error) from error
+    """Write SnapGene-flavoured GenBank: SnapGene imports the primers and computes their sites."""
 
-    annotations = dict(record.metadata.get("annotations", {}))
-    annotations["molecule_type"] = "DNA"
-    annotations["topology"] = record.topology
-    output = SeqRecord(
-        Seq(record.sequence),
-        id=record.name,
+    from .snapgene_genbank import write_snapgene_genbank
+
+    text = write_snapgene_genbank(
         name=record.name,
-        description=str(record.metadata.get("description", "")),
-        annotations=annotations,
+        sequence=record.sequence,
+        topology=record.topology,
+        features=[
+            {
+                "name": f.name,
+                "type": f.type,
+                "strand": f.strand,
+                "segments": [{"start": seg.start, "end": seg.end} for seg in f.segments],
+            }
+            for f in record.features
+        ],
+        primers=[{"name": p.name, "sequence": p.sequence} for p in record.primers],
     )
-    for feature in record.features:
-        locations = [
-            SimpleLocation(
-                segment.start,
-                segment.end,
-                strand=(1 if feature.strand == "+" else -1 if feature.strand == "-" else None),
-            )
-            for segment in feature.segments
-        ]
-        location = locations[0] if len(locations) == 1 else CompoundLocation(locations)
-        qualifiers = {
-            key: (value if isinstance(value, list) else [str(value)])
-            for key, value in feature.qualifiers.items()
-        }
-        qualifiers.setdefault("label", [feature.name])
-        output.features.append(
-            SeqFeature(location=location, type=feature.type, qualifiers=qualifiers)
-        )
-    for primer in record.primers:
-        if primer.binding_start is None or primer.binding_end is None:
-            continue
-        location = SimpleLocation(
-            primer.binding_start,
-            primer.binding_end,
-            strand=1 if primer.strand == "+" else -1,
-        )
-        qualifiers = {
-            "label": [primer.name],
-            "sequence": [primer.sequence],
-            "tm_standard": [primer.tm_standard],
-        }
-        if primer.tm_celsius is not None:
-            qualifiers["tm_celsius"] = [str(primer.tm_celsius)]
-        output.features.append(
-            SeqFeature(location=location, type="primer_bind", qualifiers=qualifiers)
-        )
-    SeqIO.write(output, str(target), "genbank")
-    return WriteReport(str(target), "genbank")
+    target.write_text(text)
+    return WriteReport(str(target), "genbank-snapgene")
+
+
+def _snapgene_primer_sequence(notes: list[str]) -> str | None:
+    """Primer sequence from SnapGene's ``/note="color: ...; sequence: ..."`` convention."""
+
+    if not notes:
+        return None
+    for part in str(notes[-1]).replace("\n", " ").split(";"):
+        key, _, value = part.partition(":")
+        if key.strip().lower() == "sequence" and value.strip():
+            return "".join(value.split()).upper()
+    return None
