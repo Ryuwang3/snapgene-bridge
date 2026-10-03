@@ -1,0 +1,10 @@
+{
+  "command": "primers",
+  "input": "plasmid.dna",
+  "target": {
+    "start": 120,
+    "end": 840
+  },
+  "thermodynamic_standard": "primer3",
+  "output": "output/plasmid-with-primers.dna"
+}
