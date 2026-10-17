@@ -65,6 +65,86 @@ was recorded in the same session.
 - [Command Line: Creating Maps of DNA Sequences](https://support.snapgene.com/hc/en-us/articles/10384408885268-Command-Line-Creating-Maps-of-DNA-Sequences)
 - [What is Genbank - SnapGene Format?](https://support.snapgene.com/hc/en-us/articles/10242682237588-What-is-Genbank-SnapGene-Format)
 
+## REA-verified CLI surface (SnapGene 8.0.0, Windows 11, 2026-10-18)
+
+This section was produced on the same node with REA 6.5.0 and Ghidra 12.1.4 in
+read-only mode. REA read the shipped `SnapGene.exe`; it did not inject into,
+patch, or run SnapGene as a data source. The observations below are the
+command-line surface only, and they reproduce and extend the 2026-10-03 entry.
+
+Target identity:
+
+- `C:\Program Files\SnapGene\SnapGene.exe`, 37,611,928 bytes.
+- SHA-256 `86164d9da2ba268b1d467c9abcdf872159fb3edd72af96e85806ce2c0466f98f`.
+- Version resource read independently: ProductVersion 8.0.0, FileVersion 8.0.0,
+  CompanyName GSL Biotech LLC, OriginalFilename SnapGene.exe.
+- REA analysis of that exact digest: format pe, architecture x86_64,
+  image base 0x140000000, 9 segments, 79,464 procedures, 41,118 defined strings
+  (Evidence `ev_687775b524400fbaedcd5d4c61206a1a0a255866b4d530f7e75f8ade089883f5`).
+
+Command-line behaviour. Each case ran with its own redirected stdout and
+stderr through `Start-Process -PassThru`, and its exit code was recorded:
+
+| Invocation | Exit code | stdout | stderr | Outcome |
+| --- | --- | --- | --- | --- |
+| `--help` | 0 | 0 B | 0 B | returns at once, prints nothing |
+| `--version` | 0 | 0 B | 0 B | returns at once, prints nothing |
+| `--definitely-not-a-flag` | 0 | 0 B | 0 B | returns at once, prints nothing |
+| no arguments | not observed | - | - | did not return; the live process had to be killed |
+
+The table is the reason this note treats the CLI as un-introspectable:
+
+- The three flag cases are indistinguishable from one another. An agent cannot
+  tell a supported flag from an unknown one through the exit status or output,
+  so the bridge must not treat exit 0 as proof that an option was understood.
+- `--help` printing nothing is not a bug in the bridge's argument handling; it
+  is the observed behaviour of the vendor binary.
+- The no-argument case starts the GUI and blocks. That matches the repository's
+  existing rule that the CLI cannot run while the GUI is open, and it is one
+  more way a node can appear hung.
+
+This does not establish which flags exist. It establishes that the binary will
+not tell you, which is the fact the bridge's design already assumes: version
+detection reads the PE version resource, and capability discovery does not
+depend on CLI output.
+
+## REA analysis boundary on this target
+
+REA's Windows Ghidra lane completed a full auto-analysis of the 37.6 MB binary,
+but not under the default budget. The observed startup outcomes were:
+
+| Analyzer preset | Startup budget | Result |
+| --- | --- | --- |
+| `ghidra-default` | 330 s | `provider_timeout` |
+| `ghidra-default` | 1,800 s | `provider_timeout` |
+| `ghidra-default+disabled:WindowsResourceReference` | 5,400 s | overview returned in 2,337 s |
+
+A 360,448-byte system executable (`notepad.exe`) completed the same
+`binary_overview` operation in 231 s under `ghidra-default`, so the boundary is
+target size, not the Windows lane.
+
+Cold-session string searches are the practical limit for this target. On the
+completed session, the first `search_strings` request had not returned after
+29 minutes, and three further searches on the same target did not return within
+a further 15 minutes. Those are upper bounds from requests that were stopped,
+not completed measurements. A snapshot saved from a successful `analyze`
+(14,958 bytes) did not remove that cost: a `search_strings` request against
+the saved snapshot still had not returned after about 11 minutes.
+
+Consequence for this repository: REA is usable here for artifact identity and
+structure, and it is not yet a practical way to enumerate SnapGene's internal
+strings on this host. Anything that depends on internal symbols has to come from
+the CLI behaviour rather than from static symbol recovery.
+
+## Re-check the boundary before relying on this note
+
+These are single-host observations from 2026-10-18, not guarantees. Before
+publishing a release or making a legal claim, re-run the command-line probe and
+re-read the target digest. The REA side of the note depends on Ghidra 12.1.4,
+JDK 21 and `REA_GHIDRA_DISABLED_ANALYZERS=WindowsResourceReference`; a different
+preset or a newer Ghidra can change both the timing and whether analysis
+completes at all.
+
 ## Open questions before a public release
 
 1. Which SnapGene or Viewer versions are used in the lab?
