@@ -129,7 +129,7 @@ completed session, the first `search_strings` request had not returned after
 a further 15 minutes. Those are upper bounds from requests that were stopped,
 not completed measurements. A snapshot saved from a successful `analyze`
 (14,958 bytes) did not remove that cost: a `search_strings` request against
-the saved snapshot still had not returned after about 11 minutes.
+the saved snapshot was still running after about 20 minutes and was stopped.
 
 Consequence for this repository: REA is usable here for artifact identity and
 structure, and it is not yet a practical way to enumerate SnapGene's internal
